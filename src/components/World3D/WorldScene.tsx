@@ -683,26 +683,26 @@ export const WorldScene: React.FC<WorldSceneProps> = ({
     sunLightRef.current.position.set(Math.cos(sunAngle) * 20, Math.sin(sunAngle) * 20, 10);
 
     if (timeOfDay < 0.2 || timeOfDay > 0.85) {
-      // Midnight
-      sceneRef.current.background = new THREE.Color(0x07040d);
-      hemiLightRef.current.color.set(0x381d60);
-      hemiLightRef.current.groundColor.set(0x090514);
-      sunLightRef.current.intensity = 0.3;
+      // Midnight - luminous moonlit sanctuary
+      sceneRef.current.background = new THREE.Color(0x0e071f);
+      hemiLightRef.current.color.set(0x93c5fd);
+      hemiLightRef.current.groundColor.set(0x2e1065);
+      sunLightRef.current.intensity = 0.95;
     } else if (timeOfDay < 0.35) {
-      // Sunrise
+      // Sunrise - warm blush rose
       sceneRef.current.background = new THREE.Color(0x4c1d4f);
       hemiLightRef.current.color.set(0xfb7185);
-      sunLightRef.current.intensity = 1.6;
+      sunLightRef.current.intensity = 1.9;
     } else if (timeOfDay < 0.7) {
-      // Day
-      sceneRef.current.background = new THREE.Color(0x1e1538);
+      // Day - bright vibrant violet sky
+      sceneRef.current.background = new THREE.Color(0x241442);
       hemiLightRef.current.color.set(0xffe4e6);
-      sunLightRef.current.intensity = 2.2;
+      sunLightRef.current.intensity = 2.4;
     } else {
-      // Sunset / Golden hour
-      sceneRef.current.background = new THREE.Color(0x4a154b);
-      hemiLightRef.current.color.set(0xf43f5e);
-      sunLightRef.current.intensity = 1.8;
+      // Sunset - golden hour neon glow
+      sceneRef.current.background = new THREE.Color(0x3b113f);
+      hemiLightRef.current.color.set(0xf472b6);
+      sunLightRef.current.intensity = 2.0;
     }
   }, [timeOfDay]);
 
@@ -896,7 +896,7 @@ export const WorldScene: React.FC<WorldSceneProps> = ({
 
       {/* Selected Object Manipulation Toolbar */}
       {selectedObjectId && (
-        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 flex items-center gap-1.5 p-2 rounded-2xl bg-slate-950/90 backdrop-blur-xl border border-pink-500/40 shadow-2xl">
+        <div className="absolute bottom-24 sm:bottom-20 left-1/2 -translate-x-1/2 flex items-center gap-1.5 p-2 rounded-2xl bg-slate-950/90 backdrop-blur-xl border border-pink-500/40 shadow-2xl z-30">
           <span className="text-[11px] font-bold text-pink-300 px-2 uppercase">Selected</span>
           <button
             onClick={() => handleMoveSelected(0, -0.5)}
@@ -966,7 +966,7 @@ export const WorldScene: React.FC<WorldSceneProps> = ({
 
       {/* Recolor Pop-up */}
       {colorPickerTarget && (
-        <div className="absolute bottom-36 left-1/2 -translate-x-1/2 flex items-center gap-2 p-3 rounded-2xl bg-black/90 backdrop-blur-xl border border-pink-500 shadow-2xl">
+        <div className="absolute bottom-40 sm:bottom-36 left-1/2 -translate-x-1/2 flex items-center gap-2 p-3 rounded-2xl bg-black/90 backdrop-blur-xl border border-pink-500 shadow-2xl z-30">
           <span className="text-xs font-bold text-purple-300">Choose Hue:</span>
           {['#ec4899', '#f43f5e', '#a855f7', '#38bdf8', '#10b981', '#f59e0b', '#78350f', '#e2e8f0'].map(c => (
             <button
@@ -984,7 +984,7 @@ export const WorldScene: React.FC<WorldSceneProps> = ({
 
       {/* Placer Guidance Toast */}
       {placingTemplate && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 px-4 py-2 rounded-2xl bg-pink-950/90 backdrop-blur-xl border border-pink-500 text-xs font-bold text-pink-200 shadow-2xl flex items-center gap-2 animate-pulse">
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 px-4 py-2 rounded-2xl bg-pink-950/90 backdrop-blur-xl border border-pink-500 text-xs font-bold text-pink-200 shadow-2xl flex items-center gap-2 animate-pulse z-30">
           <span>Click anywhere on the ground to place {placingTemplate.name} {placingTemplate.emoji}</span>
           <button
             onClick={() => {
@@ -999,7 +999,7 @@ export const WorldScene: React.FC<WorldSceneProps> = ({
       )}
 
       {/* Bottom Controls / Keyboard Movement Legend (Desktop) */}
-      <div className="hidden sm:flex absolute bottom-4 right-4 items-center gap-2 p-2 rounded-2xl bg-black/60 backdrop-blur-md border border-purple-500/20 text-[11px] text-purple-200/80">
+      <div className="hidden sm:flex absolute bottom-4 right-4 items-center gap-2 p-2 rounded-2xl bg-black/60 backdrop-blur-md border border-purple-500/20 text-[11px] text-purple-200/80 z-20">
         <span className="px-1.5 py-0.5 rounded bg-white/10 font-mono font-bold text-pink-300">WASD</span>
         <span>or</span>
         <span className="px-1.5 py-0.5 rounded bg-white/10 font-mono font-bold text-pink-300">Arrows</span>
@@ -1009,12 +1009,12 @@ export const WorldScene: React.FC<WorldSceneProps> = ({
       </div>
 
       {/* Virtual On-Screen Touch Joystick for Mobile / Phones */}
-      <div className="absolute bottom-6 left-4 z-30 flex items-center gap-3 select-none touch-none">
+      <div className="absolute bottom-24 sm:bottom-6 left-4 z-30 flex items-center gap-3 select-none touch-none">
         <div
           onTouchStart={handleJoystickTouchStart}
           onTouchMove={handleJoystickTouchMove}
           onTouchEnd={handleJoystickTouchEnd}
-          className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-slate-950/75 border-2 border-purple-500/40 backdrop-blur-xl flex items-center justify-center shadow-2xl active:border-pink-500/80 cursor-pointer"
+          className="relative w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-slate-950/85 border-2 border-purple-500/50 backdrop-blur-xl flex items-center justify-center shadow-2xl active:border-pink-500 cursor-pointer"
         >
           {/* Guide marks */}
           <div className="absolute inset-1 rounded-full border border-dashed border-purple-500/20 pointer-events-none" />

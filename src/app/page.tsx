@@ -11,6 +11,7 @@ import { PrivacyShield } from '@/components/Privacy/PrivacyShield';
 import { WorldScene } from '@/components/World3D/WorldScene';
 import { ChatPanel } from '@/components/Chat/ChatPanel';
 import { CallModal } from '@/components/Chat/CallModal';
+import { IncomingCallModal, OutgoingCallingModal } from '@/components/Chat/IncomingCallModal';
 import { AvatarStudio } from '@/components/AvatarStudio/AvatarStudio';
 import {
   AvatarConfig,
@@ -45,10 +46,19 @@ export default function VibePairApp() {
   // App Navigation View
   const [activeView, setActiveView] = useState<'world' | 'chat' | 'avatar' | 'activities' | 'memories' | 'ai'>('world');
 
-  // Call Modal State
+  // Call States: Active in-call, Incoming ringing, Outgoing ringing
   const [activeCall, setActiveCall] = useState<{
     type: 'voice' | 'video' | 'avatar';
     isCaller: boolean;
+  } | null>(null);
+
+  const [incomingCallRequest, setIncomingCallRequest] = useState<{
+    type: 'voice' | 'video' | 'avatar';
+    callerName: string;
+  } | null>(null);
+
+  const [outgoingCall, setOutgoingCall] = useState<{
+    type: 'voice' | 'video' | 'avatar';
   } | null>(null);
 
   // Panic / Stealth mode state
@@ -141,11 +151,30 @@ export default function VibePairApp() {
     });
 
     const unsubCallReq = multiplayer.on('CALL_SIGNAL', (msg: any) => {
-      if (msg.data?.action === 'START_CALL') {
-        setActiveCall({ type: msg.data.type || 'voice', isCaller: false });
-        showToast(`📞 Incoming ${msg.data.type || 'voice'} call from ${partnerName}!`);
-      } else if (msg.data?.action === 'END_CALL') {
+      const data = msg.data;
+      if (!data) return;
+
+      if (data.action === 'INCOMING_CALL_REQUEST') {
+        setIncomingCallRequest({
+          type: data.type || 'video',
+          callerName: data.callerName || partnerName,
+        });
+      } else if (data.action === 'CALL_ACCEPTED') {
+        setOutgoingCall(null);
+        setActiveCall({ type: data.type || 'video', isCaller: true });
+        showToast(`📞 ${partnerName} answered the call!`);
+      } else if (data.action === 'CALL_DECLINED') {
+        setOutgoingCall(null);
+        showToast(`🌸 ${partnerName} couldn't answer right now.`);
+      } else if (data.action === 'CALL_CANCELLED') {
+        setIncomingCallRequest(null);
+      } else if (data.action === 'START_CALL') {
+        // Direct start fallback
+        setActiveCall({ type: data.type || 'video', isCaller: false });
+      } else if (data.action === 'END_CALL') {
         setActiveCall(null);
+        setIncomingCallRequest(null);
+        setOutgoingCall(null);
         showToast('📞 Call ended.');
       }
     });
@@ -224,10 +253,38 @@ export default function VibePairApp() {
     showToast('✨ Avatar synced with partner!');
   };
 
-  // Start Call
+  // Start Call (sends ringing request to partner)
   const handleStartCall = (type: 'voice' | 'video' | 'avatar') => {
-    setActiveCall({ type, isCaller: true });
-    multiplayer.send('CALL_SIGNAL', { action: 'START_CALL', type });
+    setOutgoingCall({ type });
+    multiplayer.send('CALL_SIGNAL', {
+      action: 'INCOMING_CALL_REQUEST',
+      type,
+      callerName: userName,
+    });
+  };
+
+  // Partner accepts incoming call
+  const handleAcceptCall = () => {
+    if (!incomingCallRequest) return;
+    const callType = incomingCallRequest.type;
+    setIncomingCallRequest(null);
+    setActiveCall({ type: callType, isCaller: false });
+    multiplayer.send('CALL_SIGNAL', {
+      action: 'CALL_ACCEPTED',
+      type: callType,
+    });
+  };
+
+  // Partner declines incoming call
+  const handleDeclineCall = () => {
+    setIncomingCallRequest(null);
+    multiplayer.send('CALL_SIGNAL', { action: 'CALL_DECLINED' });
+  };
+
+  // Caller cancels outgoing ringing call
+  const handleCancelOutgoingCall = () => {
+    setOutgoingCall(null);
+    multiplayer.send('CALL_SIGNAL', { action: 'CALL_CANCELLED' });
   };
 
   // Forward love letter / date idea from AI directly into Chat
@@ -262,6 +319,7 @@ export default function VibePairApp() {
           activeView={activeView}
           onSelectView={setActiveView}
           onTriggerPanic={() => setIsPanicMode(true)}
+          onStartCall={handleStartCall}
           ambientGenerator={ambientGenerator}
         />
 
@@ -370,6 +428,25 @@ export default function VibePairApp() {
           />
         )}
 
+        {/* Incoming Call Ringing Modal */}
+        {incomingCallRequest && (
+          <IncomingCallModal
+            callerName={incomingCallRequest.callerName}
+            callType={incomingCallRequest.type}
+            onAccept={handleAcceptCall}
+            onDecline={handleDeclineCall}
+          />
+        )}
+
+        {/* Outgoing Calling Ringing Modal */}
+        {outgoingCall && (
+          <OutgoingCallingModal
+            partnerName={partnerName}
+            callType={outgoingCall.type}
+            onCancel={handleCancelOutgoingCall}
+          />
+        )}
+
         {/* Active WebRTC Voice / Video / 3D Avatar Call Modal */}
         {activeCall && (
           <CallModal
@@ -379,7 +456,10 @@ export default function VibePairApp() {
             multiplayer={multiplayer}
             myAvatarConfig={myAvatarConfig}
             partnerAvatarConfig={partnerAvatarConfig}
-            onClose={() => setActiveCall(null)}
+            onClose={() => {
+              setActiveCall(null);
+              multiplayer.send('CALL_SIGNAL', { action: 'END_CALL' });
+            }}
           />
         )}
       </div>

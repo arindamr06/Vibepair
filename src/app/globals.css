@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #07040d;
+  --background: #080410;
   --foreground: #f8fafc;
 }
 
@@ -13,35 +13,43 @@
 }
 
 body {
-  background-color: #07040d;
+  background-color: #080410;
   color: #f8fafc;
   font-family: var(--font-sans), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Custom Neon Glow Utilities */
 .neon-glow-pink {
-  box-shadow: 0 0 25px -5px rgba(236, 72, 153, 0.5), 0 0 10px -2px rgba(236, 72, 153, 0.3);
+  box-shadow: 0 0 25px -4px rgba(244, 63, 94, 0.55), 0 0 10px -2px rgba(236, 72, 153, 0.4);
 }
 
 .neon-glow-purple {
-  box-shadow: 0 0 25px -5px rgba(168, 85, 247, 0.5), 0 0 10px -2px rgba(168, 85, 247, 0.3);
+  box-shadow: 0 0 25px -4px rgba(168, 85, 247, 0.55), 0 0 10px -2px rgba(192, 132, 252, 0.4);
 }
 
 .neon-text-pink {
-  text-shadow: 0 0 12px rgba(236, 72, 153, 0.7);
+  text-shadow: 0 0 14px rgba(244, 63, 94, 0.75);
 }
 
 .neon-text-purple {
-  text-shadow: 0 0 12px rgba(168, 85, 247, 0.7);
+  text-shadow: 0 0 14px rgba(168, 85, 247, 0.75);
 }
 
-/* Custom Glassmorphism */
+/* Custom High-Contrast Glassmorphism */
 .glass-panel {
-  background: rgba(15, 10, 26, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(168, 85, 247, 0.2);
+  background: rgba(18, 11, 32, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(236, 72, 153, 0.25);
+}
+
+.glass-panel-purple {
+  background: rgba(15, 9, 28, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(168, 85, 247, 0.3);
 }
 
 /* Custom Sleek Scrollbar */
@@ -51,16 +59,16 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(10, 7, 19, 0.6);
+  background: rgba(10, 6, 20, 0.7);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(168, 85, 247, 0.35);
+  background: rgba(168, 85, 247, 0.45);
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(236, 72, 153, 0.6);
+  background: rgba(236, 72, 153, 0.75);
 }
 
 /* Hide scrollbar utility */

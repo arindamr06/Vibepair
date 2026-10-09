@@ -210,19 +210,37 @@ export const CallModal: React.FC<CallModalProps> = ({
         } catch (offerErr) {
           console.error('Error creating WebRTC offer:', offerErr);
         }
+      } else {
+        // Receiver announces readiness to caller
+        multiplayer.send('WEBRTC_SIGNAL', { action: 'RECEIVER_READY' });
+      }
+
+      // Process any early signals that arrived before media setup finished
+      while (earlySignalsQueue.current.length > 0) {
+        const pending = earlySignalsQueue.current.shift();
+        if (pending) await processSignal(pending);
       }
     }
 
-    startMediaAndHandshake();
+    const earlySignalsQueue = { current: [] as any[] };
 
-    // Listen to WebRTC signaling messages from partner
-    const unsubWebRTC = multiplayer.on('WEBRTC_SIGNAL', async (msg: any) => {
-      const data = msg.data;
+    async function processSignal(data: any) {
       if (!data || isCleanedUp || !pcRef.current) return;
       const peer = pcRef.current;
 
       try {
-        if (data.action === 'OFFER' && !isCaller) {
+        if (data.action === 'RECEIVER_READY' && isCaller) {
+          // Receiver is ready, create or resend offer
+          const offer = await peer.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+          });
+          await peer.setLocalDescription(offer);
+          multiplayer.send('WEBRTC_SIGNAL', {
+            action: 'OFFER',
+            sdp: peer.localDescription,
+          });
+        } else if (data.action === 'OFFER' && !isCaller) {
           // Receiver sets remote offer and creates answer
           await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
 
@@ -262,6 +280,19 @@ export const CallModal: React.FC<CallModalProps> = ({
       } catch (signalErr) {
         console.warn('WebRTC signaling event error:', signalErr);
       }
+    }
+
+    startMediaAndHandshake();
+
+    // Listen to WebRTC signaling messages from partner
+    const unsubWebRTC = multiplayer.on('WEBRTC_SIGNAL', async (msg: any) => {
+      const data = msg.data;
+      if (!data || isCleanedUp) return;
+      if (!pcRef.current) {
+        earlySignalsQueue.current.push(data);
+        return;
+      }
+      await processSignal(data);
     });
 
     return () => {

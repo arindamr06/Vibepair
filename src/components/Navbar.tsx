@@ -16,6 +16,7 @@ import {
   Sparkles,
   Volume2,
   VolumeX,
+  Video,
 } from 'lucide-react';
 import { AmbientSoundGenerator } from '@/lib/audioFx';
 
@@ -27,6 +28,7 @@ interface NavbarProps {
   activeView: 'world' | 'chat' | 'avatar' | 'activities' | 'memories' | 'ai';
   onSelectView: (view: 'world' | 'chat' | 'avatar' | 'activities' | 'memories' | 'ai') => void;
   onTriggerPanic: () => void;
+  onStartCall?: (type: 'voice' | 'video' | 'avatar') => void;
   ambientGenerator: AmbientSoundGenerator;
 }
 
@@ -38,6 +40,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeView,
   onSelectView,
   onTriggerPanic,
+  onStartCall,
   ambientGenerator,
 }) => {
   const [copiedRoom, setCopiedRoom] = useState(false);
@@ -138,17 +141,26 @@ export const Navbar: React.FC<NavbarProps> = ({
 
       {/* Right Controls: Partner Presence, Ambient Music & Panic Mode */}
       <div className="flex items-center gap-2">
-        {/* Partner Status Pill */}
-        <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 rounded-xl bg-slate-900 border border-purple-500/20 text-xs">
+        {/* Partner Status Pill & Quick Call Trigger */}
+        <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-xl bg-slate-900 border border-purple-500/20 text-xs">
           <span
             className={`w-2 h-2 rounded-full ${
               isPartnerConnected ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500'
             }`}
           />
-          <span className="text-purple-200">{partnerName}</span>
-          <span className="text-[10px] text-purple-400/60">
+          <span className="text-purple-200 hidden sm:inline">{partnerName}</span>
+          <span className="text-[10px] text-purple-400/60 hidden md:inline">
             {isPartnerConnected ? 'Online' : 'Waiting...'}
           </span>
+          {onStartCall && (
+            <button
+              onClick={() => onStartCall('video')}
+              className="ml-1 p-1 rounded-lg bg-pink-600/30 hover:bg-pink-600 text-pink-300 hover:text-white border border-pink-500/40 transition-all"
+              title={`Start Video Call with ${partnerName}`}
+            >
+              <Video className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
 
         {/* Ambient Lo-Fi / Synth Soundtrack Toggle */}
