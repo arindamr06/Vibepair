@@ -35,8 +35,8 @@ export const PairModal: React.FC<PairModalProps> = ({ isOpen, onConnected }) => 
 
     if (urlRoom && urlKey) {
       setTab('join');
-      setRoomCode(urlRoom);
-      setSecretKey(urlKey);
+      setRoomCode(urlRoom.trim().toUpperCase());
+      setSecretKey(urlKey.trim());
     } else {
       const savedRoom = localStorage.getItem('vibepair_last_room');
       const savedKey = localStorage.getItem('vibepair_last_key');
@@ -45,8 +45,8 @@ export const PairModal: React.FC<PairModalProps> = ({ isOpen, onConnected }) => 
       if (savedName) setUserName(savedName);
 
       if (savedRoom && savedKey) {
-        setRoomCode(savedRoom);
-        setSecretKey(savedKey);
+        setRoomCode(savedRoom.trim().toUpperCase());
+        setSecretKey(savedKey.trim());
       } else {
         const newCode = generatePairCode();
         const newKey = generateSecretKey();
@@ -72,7 +72,9 @@ export const PairModal: React.FC<PairModalProps> = ({ isOpen, onConnected }) => 
 
   const handleCopyInviteLink = () => {
     if (typeof window === 'undefined') return;
-    const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(roomCode)}&key=${encodeURIComponent(secretKey)}`;
+    const cleanRoom = roomCode.trim().toUpperCase();
+    const cleanKey = secretKey.trim();
+    const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(cleanRoom)}&key=${encodeURIComponent(cleanKey)}`;
     navigator.clipboard.writeText(url);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2200);

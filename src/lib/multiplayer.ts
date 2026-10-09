@@ -1,8 +1,11 @@
 /**
  * VibePair Multiplayer Synchronization Engine
- * Combines BroadcastChannel + localStorage StorageEvent (instant local tab sync)
- * + HTTP Signaling Broker with Deduplication & Overlapping Windows (cross-device/network sync).
- * All payloads are automatically encrypted with the shared CryptoKey (AES-256-GCM).
+ * Multi-Network Resilience Backbone:
+ * 1. BroadcastChannel + localStorage StorageEvent (instant same-origin tab sync)
+ * 2. Next.js /api/signal broker (local network / self-hosted sync)
+ * 3. Worldwide Global PubSub SSE Broker (ntfy.sh) for instant cross-network sync
+ *    (works across mobile 4G/5G, separate Wi-Fi networks, and serverless platforms like Vercel).
+ * All payloads are client-side End-to-End Encrypted with AES-256-GCM.
  */
 
 import { encryptPayload, decryptPayload } from './crypto';
@@ -27,16 +30,22 @@ export class MultiplayerClient {
 
   private broadcastChannel: BroadcastChannel | null = null;
   private listeners: Map<string, Set<MessageListener>> = new Map();
-  private pollInterval: number | null = null;
+  private localPollInterval: number | null = null;
+  private globalPollInterval: number | null = null;
+  private globalEventSource: EventSource | null = null;
   private lastPollTimestamp: number = 0;
-  private peerConnection: RTCPeerConnection | null = null;
-  private dataChannel: RTCDataChannel | null = null;
   private seenPacketIds: Set<string> = new Set();
   private seenMessageIds: Set<string> = new Set();
   private storageListener: ((e: StorageEvent) => void) | null = null;
+  private globalTopic: string = '';
 
   constructor() {
     this.peerId = 'peer_' + Math.random().toString(36).substring(2, 9);
+  }
+
+  private getGlobalTopic(code: string): string {
+    const clean = (code || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+    return `vibepair_${clean}`;
   }
 
   public init(roomCode: string, cryptoKey: CryptoKey, userName: string) {
@@ -44,6 +53,7 @@ export class MultiplayerClient {
 
     this.roomCode = (roomCode || '').trim().toUpperCase();
     this.cryptoKey = cryptoKey;
+    this.globalTopic = this.getGlobalTopic(this.roomCode);
 
     // 1. Setup local BroadcastChannel for same-origin tabs
     try {
@@ -73,21 +83,75 @@ export class MultiplayerClient {
       window.addEventListener('storage', this.storageListener);
     }
 
-    // 3. Setup periodic presence and signaling poll (snappy 650ms for near-instant message delivery)
+    // 3. Setup Global Worldwide SSE Stream (works across mobile data, different Wi-Fi, and Vercel)
+    this.startGlobalSSEStream();
+
+    // 4. Setup periodic presence & local signal polling
     this.startSignalingLoop(userName);
     this.sendPresence(userName, 'online');
   }
 
+  private startGlobalSSEStream() {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined' || !this.globalTopic) return;
+
+    try {
+      const url = `https://ntfy.sh/${this.globalTopic}/sse`;
+      const es = new EventSource(url);
+      this.globalEventSource = es;
+
+      es.onmessage = async (evt) => {
+        try {
+          const parsed = JSON.parse(evt.data);
+          if (parsed.event === 'message' && parsed.message) {
+            const packet = JSON.parse(parsed.message);
+            if (packet && packet.senderId !== this.peerId) {
+              await this.processSignalPacket(packet);
+            }
+          }
+        } catch {}
+      };
+
+      es.onerror = () => {
+        // EventSource automatically retries connection
+      };
+    } catch (err) {
+      console.warn('Global SSE stream setup error:', err);
+    }
+
+    // Also set a global poll fallback every 1200ms in case SSE is blocked by proxies
+    this.globalPollInterval = window.setInterval(async () => {
+      if (!this.globalTopic || !this.cryptoKey) return;
+      try {
+        const res = await fetch(`https://ntfy.sh/${this.globalTopic}/json?poll=1&since=20s`);
+        if (!res.ok) return;
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.event === 'message' && parsed.message) {
+              const packet = JSON.parse(parsed.message);
+              if (packet && packet.senderId !== this.peerId) {
+                await this.processSignalPacket(packet);
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+    }, 1200);
+  }
+
   private startSignalingLoop(userName: string) {
-    if (this.pollInterval) clearInterval(this.pollInterval);
+    if (this.localPollInterval) clearInterval(this.localPollInterval);
 
     // Initial announce
     this.sendSignal('PRESENCE', { status: 'online', name: userName });
 
-    this.pollInterval = window.setInterval(async () => {
+    this.localPollInterval = window.setInterval(async () => {
       if (!this.roomCode || !this.cryptoKey) return;
       try {
-        // Query with 5000ms overlapping window to prevent race conditions or dropped packets
+        // Query local /api/signal with 5000ms overlapping window
         const sinceParam = Math.max(0, this.lastPollTimestamp - 5000);
         const res = await fetch(
           `/api/signal?roomCode=${encodeURIComponent(this.roomCode)}&senderId=${encodeURIComponent(this.peerId)}&since=${sinceParam}`
@@ -100,34 +164,37 @@ export class MultiplayerClient {
 
         if (Array.isArray(data.signals)) {
           for (const s of data.signals) {
-            // Deduplicate signal packet by ID
-            if (s.id) {
-              if (this.seenPacketIds.has(s.id)) continue;
-              this.seenPacketIds.add(s.id);
-              if (this.seenPacketIds.size > 1500) {
-                const oldest = this.seenPacketIds.values().next().value;
-                if (oldest) this.seenPacketIds.delete(oldest);
-              }
-            }
-
-            if (s.type === 'ENCRYPTED_PACKET' && typeof s.payload === 'string') {
-              await this.handleIncomingEncrypted(s.payload, s.id);
-            } else if (s.type === 'CALL_SIGNAL') {
-              // Direct unencrypted call fallback if ever used
-              this.emit({
-                id: s.id || String(Date.now()),
-                senderId: s.senderId,
-                type: 'CALL_SIGNAL',
-                data: s.payload,
-                timestamp: s.timestamp || Date.now(),
-              });
-            }
+            await this.processSignalPacket(s);
           }
         }
-      } catch (err) {
-        // Silent poll error handling
+      } catch {
+        // Silent poll error handling (global SSE handles cross-network delivery)
       }
-    }, 650);
+    }, 700);
+  }
+
+  private async processSignalPacket(s: any) {
+    if (!s || !s.id) return;
+
+    // Deduplicate signal packet by ID
+    if (this.seenPacketIds.has(s.id)) return;
+    this.seenPacketIds.add(s.id);
+    if (this.seenPacketIds.size > 2000) {
+      const oldest = this.seenPacketIds.values().next().value;
+      if (oldest) this.seenPacketIds.delete(oldest);
+    }
+
+    if (s.type === 'ENCRYPTED_PACKET' && typeof s.payload === 'string') {
+      await this.handleIncomingEncrypted(s.payload, s.id);
+    } else if (s.type === 'CALL_SIGNAL' || s.type === 'WEBRTC_SIGNAL') {
+      this.emit({
+        id: s.id,
+        senderId: s.senderId,
+        type: s.type,
+        data: s.payload,
+        timestamp: s.timestamp || Date.now(),
+      });
+    }
   }
 
   public on(type: string, callback: MessageListener) {
@@ -204,21 +271,23 @@ export class MultiplayerClient {
       } catch {}
     }
 
-    // 3. Transmit via WebRTC data channel if open
-    if (this.dataChannel && this.dataChannel.readyState === 'open') {
-      try {
-        this.dataChannel.send(encryptedString);
-      } catch {}
-    }
-
-    // 4. Post to HTTP signal broker
+    // 3. Post to HTTP signal broker (both local /api/signal AND global worldwide ntfy.sh)
     this.sendSignal('ENCRYPTED_PACKET', encryptedString);
   }
 
   public async sendSignal(type: string, payload: unknown) {
     if (!this.roomCode) return;
+    const packet = {
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      senderId: this.peerId,
+      type,
+      payload,
+      timestamp: Date.now(),
+    };
+
+    // 1. Post to local Next.js /api/signal (fire and forget)
     try {
-      await fetch('/api/signal', {
+      fetch('/api/signal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -227,8 +296,19 @@ export class MultiplayerClient {
           type,
           payload,
         }),
-      });
+      }).catch(() => {});
     } catch {}
+
+    // 2. Post to Global Worldwide pubsub broker (enables cross-network, 4G/5G, and Vercel sync)
+    if (this.globalTopic) {
+      try {
+        fetch(`https://ntfy.sh/${this.globalTopic}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify(packet),
+        }).catch(() => {});
+      } catch {}
+    }
   }
 
   public sendPresence(name: string, status: 'online' | 'in_world' | 'typing' | 'idle') {
@@ -244,7 +324,7 @@ export class MultiplayerClient {
     // Ignore messages from ourselves
     if (msg.senderId === this.peerId) return;
 
-    // Deduplicate message by message.id to avoid duplicate triggers across Broadcast + Polling
+    // Deduplicate message by message.id to avoid duplicate triggers across channels
     if (msg.id) {
       if (this.seenMessageIds.has(msg.id)) return;
       this.seenMessageIds.add(msg.id);
@@ -267,9 +347,17 @@ export class MultiplayerClient {
   }
 
   public destroy() {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
+    if (this.localPollInterval) {
+      clearInterval(this.localPollInterval);
+      this.localPollInterval = null;
+    }
+    if (this.globalPollInterval) {
+      clearInterval(this.globalPollInterval);
+      this.globalPollInterval = null;
+    }
+    if (this.globalEventSource) {
+      this.globalEventSource.close();
+      this.globalEventSource = null;
     }
     if (this.broadcastChannel) {
       this.broadcastChannel.close();
@@ -278,14 +366,6 @@ export class MultiplayerClient {
     if (this.storageListener && typeof window !== 'undefined') {
       window.removeEventListener('storage', this.storageListener);
       this.storageListener = null;
-    }
-    if (this.dataChannel) {
-      this.dataChannel.close();
-      this.dataChannel = null;
-    }
-    if (this.peerConnection) {
-      this.peerConnection.close();
-      this.peerConnection = null;
     }
     this.listeners.clear();
   }
