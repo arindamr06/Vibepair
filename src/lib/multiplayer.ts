@@ -1,7 +1,8 @@
 /**
  * VibePair Multiplayer Synchronization Engine
- * Combines BroadcastChannel (local tabs) + WebRTC DataChannel (remote peers)
- * All payloads are automatically encrypted with the shared CryptoKey.
+ * Combines BroadcastChannel + localStorage StorageEvent (instant local tab sync)
+ * + HTTP Signaling Broker with Deduplication & Overlapping Windows (cross-device/network sync).
+ * All payloads are automatically encrypted with the shared CryptoKey (AES-256-GCM).
  */
 
 import { encryptPayload, decryptPayload } from './crypto';
@@ -30,18 +31,23 @@ export class MultiplayerClient {
   private lastPollTimestamp: number = 0;
   private peerConnection: RTCPeerConnection | null = null;
   private dataChannel: RTCDataChannel | null = null;
+  private seenPacketIds: Set<string> = new Set();
+  private seenMessageIds: Set<string> = new Set();
+  private storageListener: ((e: StorageEvent) => void) | null = null;
 
   constructor() {
     this.peerId = 'peer_' + Math.random().toString(36).substring(2, 9);
   }
 
   public init(roomCode: string, cryptoKey: CryptoKey, userName: string) {
-    this.roomCode = roomCode;
+    this.destroy(); // Clean previous subscriptions if re-initializing
+
+    this.roomCode = (roomCode || '').trim().toUpperCase();
     this.cryptoKey = cryptoKey;
 
-    // 1. Setup local BroadcastChannel
+    // 1. Setup local BroadcastChannel for same-origin tabs
     try {
-      this.broadcastChannel = new BroadcastChannel(`vibepair_${roomCode}`);
+      this.broadcastChannel = new BroadcastChannel(`vibepair_${this.roomCode}`);
       this.broadcastChannel.onmessage = async (evt) => {
         const raw = evt.data;
         if (typeof raw === 'string') {
@@ -52,7 +58,22 @@ export class MultiplayerClient {
       console.warn('BroadcastChannel not available:', e);
     }
 
-    // 2. Setup periodic presence and signaling poll
+    // 2. Setup localStorage storage event listener as an instant cross-tab bus fallback
+    if (typeof window !== 'undefined') {
+      this.storageListener = async (evt: StorageEvent) => {
+        if (evt.key === `vibepair_bus_${this.roomCode}` && evt.newValue) {
+          try {
+            const parsed = JSON.parse(evt.newValue);
+            if (parsed?.senderId !== this.peerId && parsed?.payload) {
+              await this.handleIncomingEncrypted(parsed.payload, parsed.id);
+            }
+          } catch {}
+        }
+      };
+      window.addEventListener('storage', this.storageListener);
+    }
+
+    // 3. Setup periodic presence and signaling poll (snappy 650ms for near-instant message delivery)
     this.startSignalingLoop(userName);
     this.sendPresence(userName, 'online');
   }
@@ -64,26 +85,49 @@ export class MultiplayerClient {
     this.sendSignal('PRESENCE', { status: 'online', name: userName });
 
     this.pollInterval = window.setInterval(async () => {
-      if (!this.roomCode) return;
+      if (!this.roomCode || !this.cryptoKey) return;
       try {
-        const res = await fetch(`/api/signal?roomCode=${encodeURIComponent(this.roomCode)}&senderId=${this.peerId}&since=${this.lastPollTimestamp}`);
+        // Query with 5000ms overlapping window to prevent race conditions or dropped packets
+        const sinceParam = Math.max(0, this.lastPollTimestamp - 5000);
+        const res = await fetch(
+          `/api/signal?roomCode=${encodeURIComponent(this.roomCode)}&senderId=${encodeURIComponent(this.peerId)}&since=${sinceParam}`
+        );
         if (!res.ok) return;
         const data = await res.json();
         if (data.timestamp) {
-          this.lastPollTimestamp = data.timestamp;
+          this.lastPollTimestamp = Math.max(this.lastPollTimestamp, data.timestamp);
         }
 
         if (Array.isArray(data.signals)) {
           for (const s of data.signals) {
-            if (s.type === 'ENCRYPTED_PACKET') {
-              await this.handleIncomingEncrypted(s.payload);
+            // Deduplicate signal packet by ID
+            if (s.id) {
+              if (this.seenPacketIds.has(s.id)) continue;
+              this.seenPacketIds.add(s.id);
+              if (this.seenPacketIds.size > 1500) {
+                const oldest = this.seenPacketIds.values().next().value;
+                if (oldest) this.seenPacketIds.delete(oldest);
+              }
+            }
+
+            if (s.type === 'ENCRYPTED_PACKET' && typeof s.payload === 'string') {
+              await this.handleIncomingEncrypted(s.payload, s.id);
+            } else if (s.type === 'CALL_SIGNAL') {
+              // Direct unencrypted call fallback if ever used
+              this.emit({
+                id: s.id || String(Date.now()),
+                senderId: s.senderId,
+                type: 'CALL_SIGNAL',
+                data: s.payload,
+                timestamp: s.timestamp || Date.now(),
+              });
             }
           }
         }
       } catch (err) {
         // Silent poll error handling
       }
-    }, 1500);
+    }, 650);
   }
 
   public on(type: string, callback: MessageListener) {
@@ -100,7 +144,7 @@ export class MultiplayerClient {
     this.listeners.get(type)?.delete(callback);
   }
 
-  private emit(msg: SyncMessage) {
+  public emit(msg: SyncMessage) {
     const list = this.listeners.get(msg.type);
     if (list) {
       list.forEach(cb => {
@@ -123,14 +167,17 @@ export class MultiplayerClient {
     if (!this.cryptoKey) return;
 
     const message: SyncMessage<T> = {
-      id: `${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       senderId: this.peerId,
       type,
       data,
       timestamp: Date.now(),
     };
 
-    // Encrypt with WebCrypto AES-GCM
+    // Mark own message as seen so it's not reprocessed
+    this.seenMessageIds.add(message.id);
+
+    // Encrypt with WebCrypto AES-256-GCM
     const encryptedString = await encryptPayload(message, this.cryptoKey);
 
     // 1. Broadcast locally for instant multi-tab sync
@@ -142,18 +189,33 @@ export class MultiplayerClient {
       }
     }
 
-    // 2. Transmit via WebRTC data channel if open
+    // 2. Storage event bus fallback for instantaneous same-origin tab reflection
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(
+          `vibepair_bus_${this.roomCode}`,
+          JSON.stringify({
+            id: message.id,
+            senderId: this.peerId,
+            payload: encryptedString,
+            t: Date.now(),
+          })
+        );
+      } catch {}
+    }
+
+    // 3. Transmit via WebRTC data channel if open
     if (this.dataChannel && this.dataChannel.readyState === 'open') {
       try {
         this.dataChannel.send(encryptedString);
       } catch {}
     }
 
-    // 3. Post to HTTP signal broker
+    // 4. Post to HTTP signal broker
     this.sendSignal('ENCRYPTED_PACKET', encryptedString);
   }
 
-  private async sendSignal(type: string, payload: unknown) {
+  public async sendSignal(type: string, payload: unknown) {
     if (!this.roomCode) return;
     try {
       await fetch('/api/signal', {
@@ -173,13 +235,24 @@ export class MultiplayerClient {
     this.send('PRESENCE', { name, status, senderId: this.peerId });
   }
 
-  private async handleIncomingEncrypted(encryptedStr: string) {
+  public async handleIncomingEncrypted(encryptedStr: string, packetId?: string) {
     if (!this.cryptoKey) return;
+
     const msg = await decryptPayload<SyncMessage>(encryptedStr, this.cryptoKey);
     if (!msg) return;
 
     // Ignore messages from ourselves
     if (msg.senderId === this.peerId) return;
+
+    // Deduplicate message by message.id to avoid duplicate triggers across Broadcast + Polling
+    if (msg.id) {
+      if (this.seenMessageIds.has(msg.id)) return;
+      this.seenMessageIds.add(msg.id);
+      if (this.seenMessageIds.size > 2000) {
+        const oldest = this.seenMessageIds.values().next().value;
+        if (oldest) this.seenMessageIds.delete(oldest);
+      }
+    }
 
     if (msg.type === 'PRESENCE') {
       const data = msg.data as { name?: string };
@@ -201,6 +274,10 @@ export class MultiplayerClient {
     if (this.broadcastChannel) {
       this.broadcastChannel.close();
       this.broadcastChannel = null;
+    }
+    if (this.storageListener && typeof window !== 'undefined') {
+      window.removeEventListener('storage', this.storageListener);
+      this.storageListener = null;
     }
     if (this.dataChannel) {
       this.dataChannel.close();

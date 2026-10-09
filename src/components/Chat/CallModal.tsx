@@ -13,12 +13,14 @@ import {
   PhoneOff,
   Smile,
   ShieldCheck,
-  Monitor,
   Wand2,
+  Radio,
+  Sparkles,
 } from 'lucide-react';
 
 interface CallModalProps {
   callType: 'voice' | 'video' | 'avatar';
+  isCaller?: boolean;
   partnerName: string;
   multiplayer: MultiplayerClient;
   myAvatarConfig: AvatarConfig;
@@ -26,8 +28,59 @@ interface CallModalProps {
   onClose: () => void;
 }
 
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+  ],
+};
+
+// Helper: Create a fallback synthetic stream if physical camera/mic is missing
+function createFallbackStream(hasVideo: boolean): MediaStream {
+  const stream = new MediaStream();
+
+  // 1. Silent synthetic audio track
+  try {
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const dest = audioCtx.createMediaStreamDestination();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0; // Silent
+    osc.connect(gain);
+    gain.connect(dest);
+    osc.start();
+    const audioTrack = dest.stream.getAudioTracks()[0];
+    if (audioTrack) stream.addTrack(audioTrack);
+  } catch {}
+
+  // 2. Synthetic canvas video track
+  if (hasVideo) {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 240;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#0f0728';
+        ctx.fillRect(0, 0, 320, 240);
+        ctx.fillStyle = '#ec4899';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('💖 VibePair Stream', 160, 120);
+      }
+      const canvasStream = canvas.captureStream(15);
+      const vidTrack = canvasStream.getVideoTracks()[0];
+      if (vidTrack) stream.addTrack(vidTrack);
+    } catch {}
+  }
+
+  return stream;
+}
+
 export const CallModal: React.FC<CallModalProps> = ({
   callType: initialCallType,
+  isCaller = true,
   partnerName,
   multiplayer,
   myAvatarConfig,
@@ -40,50 +93,184 @@ export const CallModal: React.FC<CallModalProps> = ({
   const [activeVoiceFx, setActiveVoiceFx] = useState<VoiceEffectType>('none');
   const [fxMenuOpen, setFxMenuOpen] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'ended'>('connecting');
+  const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const voiceProcRef = useRef<VoiceEffectProcessor | null>(null);
+  const iceCandidatesQueue = useRef<RTCIceCandidateInit[]>([]);
 
   // Avatar 3D Canvas in call
   const avatarMountRef = useRef<HTMLDivElement>(null);
   const avatarModelRef = useRef<AvatarModel | null>(null);
 
-  // Call timer
+  // Call duration timer
   useEffect(() => {
     const timer = setInterval(() => setCallDuration(d => d + 1), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // WebRTC Media Setup
+  // WebRTC PeerConnection & Media Setup
   useEffect(() => {
-    let stream: MediaStream | null = null;
+    let isCleanedUp = false;
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    pcRef.current = pc;
 
-    async function initMedia() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: !isVideoMuted,
-          audio: true,
+    // Track remote ICE connection state
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setConnectionStatus('connected');
+      } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        setConnectionStatus('connecting');
+      }
+    };
+
+    // Forward local ICE candidates to partner
+    pc.onicecandidate = (event) => {
+      if (event.candidate && !isCleanedUp) {
+        multiplayer.send('WEBRTC_SIGNAL', {
+          action: 'ICE_CANDIDATE',
+          candidate: event.candidate.toJSON(),
         });
-        localStreamRef.current = stream;
+      }
+    };
 
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
+    // Receive remote media tracks
+    pc.ontrack = (event) => {
+      if (event.streams && event.streams[0]) {
+        const remoteStream = event.streams[0];
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.play().catch(() => {});
+        }
+        setConnectionStatus('connected');
+
+        // Check if stream has video tracks
+        const videoTracks = remoteStream.getVideoTracks();
+        if (videoTracks.length > 0 && videoTracks[0].enabled) {
+          setHasRemoteVideo(true);
         }
 
-        // Initialize voice DSP processor
-        const proc = new VoiceEffectProcessor();
-        proc.init(stream);
-        voiceProcRef.current = proc;
+        remoteStream.onaddtrack = () => {
+          if (remoteStream.getVideoTracks().length > 0) setHasRemoteVideo(true);
+        };
+      }
+    };
+
+    // Acquire local media and initialize WebRTC handshake
+    async function startMediaAndHandshake() {
+      let localStream: MediaStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: initialCallType !== 'voice',
+          audio: true,
+        });
       } catch (err) {
-        console.warn('Camera/Mic permission unavailable or simulated:', err);
+        console.warn('Physical camera/mic not accessible, fallback to synthetic stream:', err);
+        localStream = createFallbackStream(initialCallType !== 'voice');
+      }
+
+      if (isCleanedUp) {
+        localStream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
+      localStreamRef.current = localStream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+      }
+
+      // Initialize voice DSP processor
+      try {
+        const proc = new VoiceEffectProcessor();
+        proc.init(localStream);
+        voiceProcRef.current = proc;
+      } catch {}
+
+      // Add local tracks to peer connection
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+
+      // If this client is the Caller: create and send OFFER
+      if (isCaller) {
+        try {
+          const offer = await pc.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+          });
+          await pc.setLocalDescription(offer);
+          multiplayer.send('WEBRTC_SIGNAL', {
+            action: 'OFFER',
+            sdp: pc.localDescription,
+          });
+        } catch (offerErr) {
+          console.error('Error creating WebRTC offer:', offerErr);
+        }
       }
     }
 
-    initMedia();
+    startMediaAndHandshake();
+
+    // Listen to WebRTC signaling messages from partner
+    const unsubWebRTC = multiplayer.on('WEBRTC_SIGNAL', async (msg: any) => {
+      const data = msg.data;
+      if (!data || isCleanedUp || !pcRef.current) return;
+      const peer = pcRef.current;
+
+      try {
+        if (data.action === 'OFFER' && !isCaller) {
+          // Receiver sets remote offer and creates answer
+          await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
+
+          // Drain any queued ICE candidates
+          while (iceCandidatesQueue.current.length > 0) {
+            const cand = iceCandidatesQueue.current.shift();
+            if (cand) await peer.addIceCandidate(new RTCIceCandidate(cand));
+          }
+
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+          multiplayer.send('WEBRTC_SIGNAL', {
+            action: 'ANSWER',
+            sdp: peer.localDescription,
+          });
+        } else if (data.action === 'ANSWER' && isCaller) {
+          // Caller sets remote answer
+          await peer.setRemoteDescription(new RTCSessionDescription(data.sdp));
+
+          // Drain queued candidates
+          while (iceCandidatesQueue.current.length > 0) {
+            const cand = iceCandidatesQueue.current.shift();
+            if (cand) await peer.addIceCandidate(new RTCIceCandidate(cand));
+          }
+        } else if (data.action === 'ICE_CANDIDATE') {
+          if (data.candidate) {
+            if (peer.remoteDescription) {
+              await peer.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } else {
+              iceCandidatesQueue.current.push(data.candidate);
+            }
+          }
+        } else if (data.action === 'END_CALL') {
+          setConnectionStatus('ended');
+          setTimeout(() => onClose(), 800);
+        }
+      } catch (signalErr) {
+        console.warn('WebRTC signaling event error:', signalErr);
+      }
+    });
 
     return () => {
+      isCleanedUp = true;
+      unsubWebRTC();
+      if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
+      }
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(t => t.stop());
       }
@@ -91,7 +278,7 @@ export const CallModal: React.FC<CallModalProps> = ({
         voiceProcRef.current.destroy();
       }
     };
-  }, []);
+  }, [isCaller, initialCallType, multiplayer, onClose]);
 
   // 3D Avatar mode renderer
   useEffect(() => {
@@ -167,6 +354,13 @@ export const CallModal: React.FC<CallModalProps> = ({
     setFxMenuOpen(false);
   };
 
+  const handleEndCall = () => {
+    multiplayer.send('WEBRTC_SIGNAL', { action: 'END_CALL' });
+    multiplayer.send('CALL_SIGNAL', { action: 'END_CALL' });
+    setConnectionStatus('ended');
+    onClose();
+  };
+
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
@@ -174,42 +368,54 @@ export const CallModal: React.FC<CallModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-in fade-in">
-      <div className="relative w-full max-w-4xl h-[80vh] bg-slate-950 rounded-3xl border border-pink-500/40 shadow-2xl flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-2xl animate-in fade-in">
+      <div className="relative w-full max-w-4xl h-[86vh] sm:h-[80vh] bg-slate-950 rounded-3xl border border-pink-500/40 shadow-2xl flex flex-col overflow-hidden">
         {/* Call Top Bar */}
-        <div className="flex items-center justify-between px-6 py-4 bg-slate-900/60 border-b border-purple-500/20">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 bg-slate-900/80 border-b border-purple-500/20">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-pink-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg">
-              {partnerName.slice(0, 1).toUpperCase()}
+            <div className="relative">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-pink-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg">
+                {partnerName.slice(0, 1).toUpperCase()}
+              </div>
+              <span className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-slate-950 ${
+                connectionStatus === 'connected' ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'
+              }`} />
             </div>
             <div>
               <h3 className="font-bold text-sm text-purple-100 flex items-center gap-2">
                 <span>{partnerName}</span>
                 <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-300 font-mono border border-emerald-500/30 flex items-center gap-1">
-                  <ShieldCheck className="w-3 h-3" /> E2EE Stream
+                  <ShieldCheck className="w-3 h-3" /> E2EE WebRTC
                 </span>
               </h3>
-              <p className="text-xs text-pink-300/80 font-mono">Duration: {formatTime(callDuration)}</p>
+              <p className="text-xs text-pink-300/80 font-mono flex items-center gap-2">
+                <span>Duration: {formatTime(callDuration)}</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-sans ${
+                  connectionStatus === 'connected' ? 'text-emerald-400 bg-emerald-950/40' : 'text-amber-300 bg-amber-950/40'
+                }`}>
+                  {connectionStatus === 'connected' ? 'Live HD' : 'Connecting peer...'}
+                </span>
+              </p>
             </div>
           </div>
 
           {/* Mode Switcher: Video vs Live 3D Avatar */}
-          <div className="flex items-center gap-2 bg-black/40 p-1 rounded-2xl border border-purple-500/30">
+          <div className="flex items-center gap-1 sm:gap-2 bg-black/40 p-1 rounded-2xl border border-purple-500/30">
             <button
               onClick={() => setMode('video')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+              className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
                 mode === 'video' ? 'bg-pink-600 text-white shadow-md' : 'text-gray-400 hover:text-white'
               }`}
             >
-              Video Stream
+              Video
             </button>
             <button
               onClick={() => setMode('avatar')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition-all ${
+              className={`px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition-all ${
                 mode === 'avatar' ? 'bg-gradient-to-r from-pink-500 to-purple-600 text-white shadow-md' : 'text-gray-400 hover:text-white'
               }`}
             >
-              <Smile className="w-3.5 h-3.5" /> 3D Avatar Call
+              <Smile className="w-3.5 h-3.5" /> 3D Avatar
             </button>
           </div>
         </div>
@@ -219,26 +425,36 @@ export const CallModal: React.FC<CallModalProps> = ({
           {mode === 'avatar' ? (
             <div className="w-full h-full flex flex-col items-center justify-center">
               <div ref={avatarMountRef} className="w-full h-full max-w-lg" />
-              <div className="absolute top-4 left-6 px-3 py-1 rounded-full bg-purple-900/60 border border-purple-400/30 text-xs text-pink-200">
-                Live 3D Avatar Stream
+              <div className="absolute top-4 left-6 px-3 py-1 rounded-full bg-purple-900/60 border border-purple-400/30 text-xs text-pink-200 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-pink-400 animate-spin" /> Live 3D Avatar Stream
               </div>
             </div>
           ) : (
-            <div className="relative w-full h-full flex items-center justify-center">
-              {/* Partner video placeholder / stream */}
+            <div className="relative w-full h-full flex items-center justify-center bg-black">
+              {/* Partner remote video stream */}
               <video
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
                 className="w-full h-full object-cover"
               />
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-purple-950/30">
-                <div className="w-24 h-24 rounded-full bg-gradient-to-tr from-pink-500 to-purple-600 flex items-center justify-center text-3xl font-bold text-white shadow-2xl mb-3 animate-pulse">
-                  {partnerName.slice(0, 1).toUpperCase()}
+
+              {/* Connected / Waiting Avatar Center Card when camera is off or establishing */}
+              {(!hasRemoteVideo || initialCallType === 'voice') && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-purple-950/70 backdrop-blur-sm pointer-events-none">
+                  <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-gradient-to-tr from-pink-500 to-purple-600 flex items-center justify-center text-4xl font-bold text-white shadow-2xl mb-4 animate-pulse ring-4 ring-pink-500/30">
+                    {partnerName.slice(0, 1).toUpperCase()}
+                  </div>
+                  <div className="text-base font-bold text-purple-100 flex items-center gap-2">
+                    <span>{partnerName}</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  </div>
+                  <div className="text-xs text-pink-300/80 mt-1 flex items-center gap-1">
+                    <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                    <span>Encrypted High-Definition P2P WebRTC Audio</span>
+                  </div>
                 </div>
-                <div className="text-sm font-semibold text-purple-200">Connected with {partnerName}</div>
-                <div className="text-xs text-pink-300/60 mt-1">Encrypted High-Definition Audio & Video</div>
-              </div>
+              )}
 
               {/* Local User Self-Preview PIP */}
               <div className="absolute top-4 right-4 w-28 h-20 sm:w-44 sm:h-32 bg-black rounded-2xl border-2 border-pink-500/50 shadow-2xl overflow-hidden z-20">
@@ -263,11 +479,11 @@ export const CallModal: React.FC<CallModalProps> = ({
         </div>
 
         {/* Bottom Control Dock */}
-        <div className="p-4 bg-slate-900/90 border-t border-purple-500/20 flex items-center justify-center gap-3 relative">
+        <div className="p-3 sm:p-4 bg-slate-900/90 border-t border-purple-500/20 flex items-center justify-center gap-2.5 sm:gap-3 relative">
           {/* Mic Mute Button */}
           <button
             onClick={toggleMic}
-            className={`p-3.5 rounded-2xl transition-all shadow-lg active:scale-95 ${
+            className={`p-3 sm:p-3.5 rounded-2xl transition-all shadow-lg active:scale-95 ${
               isMicMuted
                 ? 'bg-red-600/80 text-white border border-red-500'
                 : 'bg-white/10 hover:bg-white/20 text-white border border-white/20'
@@ -280,7 +496,7 @@ export const CallModal: React.FC<CallModalProps> = ({
           {/* Video Toggle Button */}
           <button
             onClick={toggleVideo}
-            className={`p-3.5 rounded-2xl transition-all shadow-lg active:scale-95 ${
+            className={`p-3 sm:p-3.5 rounded-2xl transition-all shadow-lg active:scale-95 ${
               isVideoMuted
                 ? 'bg-red-600/80 text-white border border-red-500'
                 : 'bg-white/10 hover:bg-white/20 text-white border border-white/20'
@@ -294,7 +510,7 @@ export const CallModal: React.FC<CallModalProps> = ({
           <div className="relative">
             <button
               onClick={() => setFxMenuOpen(!fxMenuOpen)}
-              className={`p-3.5 rounded-2xl transition-all shadow-lg active:scale-95 flex items-center gap-1.5 ${
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all shadow-lg active:scale-95 flex items-center gap-1.5 ${
                 activeVoiceFx !== 'none'
                   ? 'bg-pink-600 text-white border border-pink-400'
                   : 'bg-white/10 hover:bg-white/20 text-white border border-white/20'
@@ -335,8 +551,8 @@ export const CallModal: React.FC<CallModalProps> = ({
 
           {/* End Call Button */}
           <button
-            onClick={onClose}
-            className="p-3.5 px-6 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-bold text-sm flex items-center gap-2 shadow-xl shadow-red-600/40 active:scale-95 transition-all"
+            onClick={handleEndCall}
+            className="p-3 sm:p-3.5 px-5 sm:px-6 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs sm:text-sm flex items-center gap-2 shadow-xl shadow-red-600/40 active:scale-95 transition-all"
             title="End Call"
           >
             <PhoneOff className="w-5 h-5" /> End Call

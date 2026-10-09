@@ -85,25 +85,29 @@ export const PairModal: React.FC<PairModalProps> = ({ isOpen, onConnected }) => 
   };
 
   const handleConnect = async () => {
-    if (!roomCode.trim() || !secretKey.trim()) {
+    const cleanRoom = roomCode.trim().toUpperCase();
+    const cleanKey = secretKey.trim();
+    const cleanName = userName.trim() || 'Soulmate';
+
+    if (!cleanRoom || !cleanKey) {
       alert('Please provide both Room Code and Encryption Key.');
       return;
     }
 
     setIsLoading(true);
     try {
-      const cryptoKey = await deriveKey(secretKey);
-      const fp = await computeFingerprint(roomCode, secretKey);
+      const cryptoKey = await deriveKey(cleanKey);
+      const fp = await computeFingerprint(cleanRoom, cleanKey);
 
-      localStorage.setItem('vibepair_last_room', roomCode);
-      localStorage.setItem('vibepair_last_key', secretKey);
-      localStorage.setItem('vibepair_my_name', userName);
+      localStorage.setItem('vibepair_last_room', cleanRoom);
+      localStorage.setItem('vibepair_last_key', cleanKey);
+      localStorage.setItem('vibepair_my_name', cleanName);
 
       onConnected({
-        roomCode: roomCode.trim().toUpperCase(),
-        secretKey: secretKey.trim(),
+        roomCode: cleanRoom,
+        secretKey: cleanKey,
         cryptoKey,
-        userName: userName.trim() || 'Soulmate',
+        userName: cleanName,
         fingerprint: fp,
       });
     } catch (e) {

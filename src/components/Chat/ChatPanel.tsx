@@ -45,12 +45,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   partnerName,
   onStartCall,
 }) => {
+  const getStorageKey = () => `vibepair_chat_history_${multiplayer.roomCode || 'global'}`;
+
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('vibepair_chat_history');
+      const saved = localStorage.getItem(`vibepair_chat_history_${multiplayer.roomCode || 'global'}`) || localStorage.getItem('vibepair_chat_history');
       if (saved) {
         try {
-          return JSON.parse(saved);
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length > 0) return parsed;
         } catch {}
       }
     }
@@ -83,6 +86,38 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Load chat history when room changes
+  useEffect(() => {
+    if (!multiplayer.roomCode) return;
+    const key = `vibepair_chat_history_${multiplayer.roomCode}`;
+    const saved = localStorage.getItem(key);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setMessages(parsed);
+        }
+      } catch {}
+    }
+  }, [multiplayer.roomCode]);
+
+  // Sync cross-tab changes in real-time
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      const key = `vibepair_chat_history_${multiplayer.roomCode || 'global'}`;
+      if (e.key === key && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (Array.isArray(parsed)) {
+            setMessages(parsed);
+          }
+        } catch {}
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [multiplayer.roomCode]);
+
   // Periodic expiration cleaner for disappearing messages
   useEffect(() => {
     const timer = setInterval(() => {
@@ -90,23 +125,27 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       setMessages(prev => {
         const remaining = prev.filter(m => !m.expiresAt || m.expiresAt > now);
         if (remaining.length !== prev.length) {
-          localStorage.setItem('vibepair_chat_history', JSON.stringify(remaining));
+          localStorage.setItem(getStorageKey(), JSON.stringify(remaining));
           return remaining;
         }
         return prev;
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [multiplayer.roomCode]);
 
   // Listen to incoming encrypted chat events
   useEffect(() => {
     const unsubChat = multiplayer.on('CHAT_MESSAGE', (msg: any) => {
       const newMsg = msg.data as ChatMessage;
-      if (!newMsg) return;
+      if (!newMsg || !newMsg.id) return;
       setMessages(prev => {
+        // Prevent duplicate messages
+        if (prev.some(m => m.id === newMsg.id)) return prev;
         const updated = [...prev, newMsg];
-        localStorage.setItem('vibepair_chat_history', JSON.stringify(updated));
+        try {
+          localStorage.setItem(`vibepair_chat_history_${multiplayer.roomCode || 'global'}`, JSON.stringify(updated));
+        } catch {}
         return updated;
       });
     });
@@ -154,9 +193,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       expiresAt: disappearTimer > 0 ? Date.now() + disappearTimer * 1000 : undefined,
     };
 
-    const updated = [...messages, newMsg];
-    setMessages(updated);
-    localStorage.setItem('vibepair_chat_history', JSON.stringify(updated));
+    setMessages(prev => {
+      if (prev.some(m => m.id === newMsg.id)) return prev;
+      const updated = [...prev, newMsg];
+      try {
+        localStorage.setItem(`vibepair_chat_history_${multiplayer.roomCode || 'global'}`, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
     multiplayer.send('CHAT_MESSAGE', newMsg);
     setInput('');
 
@@ -218,7 +263,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             expiresInSeconds: disappearTimer > 0 ? disappearTimer : undefined,
             expiresAt: disappearTimer > 0 ? Date.now() + disappearTimer * 1000 : undefined,
           };
-          setMessages(prev => [...prev, newMsg]);
+          setMessages(prev => {
+            if (prev.some(m => m.id === newMsg.id)) return prev;
+            const updated = [...prev, newMsg];
+            try {
+              localStorage.setItem(getStorageKey(), JSON.stringify(updated));
+            } catch {}
+            return updated;
+          });
           multiplayer.send('CHAT_MESSAGE', newMsg);
         };
         stream.getTracks().forEach(t => t.stop());
@@ -257,7 +309,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         expiresInSeconds: disappearTimer > 0 ? disappearTimer : undefined,
         expiresAt: disappearTimer > 0 ? Date.now() + disappearTimer * 1000 : undefined,
       };
-      setMessages(prev => [...prev, newMsg]);
+      setMessages(prev => {
+        if (prev.some(m => m.id === newMsg.id)) return prev;
+        const updated = [...prev, newMsg];
+        try {
+          localStorage.setItem(getStorageKey(), JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
       multiplayer.send('CHAT_MESSAGE', newMsg);
     };
     reader.readAsDataURL(file);

@@ -53,9 +53,12 @@ function b642ab(b64: string): Uint8Array {
 
 // Derive a CryptoKey from a passphrase and salt using PBKDF2 -> AES-GCM
 export async function deriveKey(passphrase: string, salt: string = 'vibepair-couple-salt-v1'): Promise<CryptoKey> {
+  const normalizedPass = (passphrase || '').trim();
+  const normalizedSalt = (salt || 'vibepair-couple-salt-v1').trim();
+
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
-    str2ab(passphrase) as any,
+    str2ab(normalizedPass) as any,
     'PBKDF2',
     false,
     ['deriveKey']
@@ -64,7 +67,7 @@ export async function deriveKey(passphrase: string, salt: string = 'vibepair-cou
   return await crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
-      salt: str2ab(salt) as any,
+      salt: str2ab(normalizedSalt) as any,
       iterations: 100000,
       hash: 'SHA-256',
     },
@@ -77,7 +80,9 @@ export async function deriveKey(passphrase: string, salt: string = 'vibepair-cou
 
 // Compute SHA-256 fingerprint for partner safety verification
 export async function computeFingerprint(roomCode: string, secretKey: string): Promise<string> {
-  const raw = str2ab(`${roomCode}:${secretKey}`);
+  const normalizedRoom = (roomCode || '').trim().toUpperCase();
+  const normalizedKey = (secretKey || '').trim();
+  const raw = str2ab(`${normalizedRoom}:${normalizedKey}`);
   const hashBuffer = await crypto.subtle.digest('SHA-256', raw as any);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   const hex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();

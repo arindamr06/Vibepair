@@ -46,7 +46,10 @@ export default function VibePairApp() {
   const [activeView, setActiveView] = useState<'world' | 'chat' | 'avatar' | 'activities' | 'memories' | 'ai'>('world');
 
   // Call Modal State
-  const [activeCallType, setActiveCallType] = useState<'voice' | 'video' | 'avatar' | null>(null);
+  const [activeCall, setActiveCall] = useState<{
+    type: 'voice' | 'video' | 'avatar';
+    isCaller: boolean;
+  } | null>(null);
 
   // Panic / Stealth mode state
   const [isPanicMode, setIsPanicMode] = useState(false);
@@ -139,8 +142,11 @@ export default function VibePairApp() {
 
     const unsubCallReq = multiplayer.on('CALL_SIGNAL', (msg: any) => {
       if (msg.data?.action === 'START_CALL') {
-        setActiveCallType(msg.data.type || 'voice');
-        showToast(`📞 Incoming ${msg.data.type} call from ${partnerName}!`);
+        setActiveCall({ type: msg.data.type || 'voice', isCaller: false });
+        showToast(`📞 Incoming ${msg.data.type || 'voice'} call from ${partnerName}!`);
+      } else if (msg.data?.action === 'END_CALL') {
+        setActiveCall(null);
+        showToast('📞 Call ended.');
       }
     });
 
@@ -220,7 +226,7 @@ export default function VibePairApp() {
 
   // Start Call
   const handleStartCall = (type: 'voice' | 'video' | 'avatar') => {
-    setActiveCallType(type);
+    setActiveCall({ type, isCaller: true });
     multiplayer.send('CALL_SIGNAL', { action: 'START_CALL', type });
   };
 
@@ -365,14 +371,15 @@ export default function VibePairApp() {
         )}
 
         {/* Active WebRTC Voice / Video / 3D Avatar Call Modal */}
-        {activeCallType && (
+        {activeCall && (
           <CallModal
-            callType={activeCallType}
+            callType={activeCall.type}
+            isCaller={activeCall.isCaller}
             partnerName={partnerName}
             multiplayer={multiplayer}
             myAvatarConfig={myAvatarConfig}
             partnerAvatarConfig={partnerAvatarConfig}
-            onClose={() => setActiveCallType(null)}
+            onClose={() => setActiveCall(null)}
           />
         )}
       </div>
